@@ -12,6 +12,7 @@ use mpcmf\system\application\webApplicationBase;
 use mpcmf\system\configuration\config;
 use mpcmf\system\helper\system\profiler;
 use mpcmf\system\threads\thread;
+use Psr\Http\Message\StreamInterface;
 use Psr\Http\Message\UploadedFileInterface;
 use React\Dns\Resolver\Factory as reactResolver;
 use React\EventLoop\Loop;
@@ -24,7 +25,6 @@ use React\Socket\ConnectionInterface;
 use React\Socket\Connector;
 use React\Socket\SocketServer;
 use React\Stream\DuplexStreamInterface;
-use React\Stream\ReadableStreamInterface;
 use Slim\Environment;
 use Slim\Http\Request;
 use Slim\Http\Response;
@@ -275,104 +275,85 @@ abstract class run
 
         cli_set_process_title("mpcmf/console server:run/child -b {$this->childHost} -p {$this->port}");
 
-// @FIX: nobody permissions tmp
-//        posix_setgid(99);
-//        posix_setuid(99);
-//        posix_seteuid(99);
-//        posix_setegid(99);
+        // @FIX: nobody permissions tmp
+        //        posix_setgid(99);
+        //        posix_setuid(99);
+        //        posix_seteuid(99);
+        //        posix_setegid(99);
 
         $loop = Loop::get();
         $socket = new SocketServer("{$this->childHost}:{$this->port}", [], $loop);
         $socket->pause();
         $http = new HttpServer(function (ServerRequest $request) use ($socket) {
-            // @HACK for get client address (reflection hack)
-            /** @var ReadableStreamInterface $requestInput */
-            $requestInput = $request->getBody()->input;
-            $thief = function (ReadableStreamInterface $reflectionClass) {
-                $connection = isset($reflectionClass->input) ? $reflectionClass->input : $reflectionClass->stream->input;
+            if(MPCMF_DEBUG) {
+                $this->output->writeln("<info>[CHILD:{$this->port}]</info> New connection");
+                $clientName = $request->getServerParams()['REMOTE_ADDR'] . '#' . spl_object_hash($request);
+                $this->output->writeln("<info>[{$clientName}] Client connected");
+            }
 
-                return $connection instanceof ConnectionInterface ? $connection : $connection->input;
-            };
-            $thief = \Closure::bind($thief, null, $requestInput);
-            // @HACK for get client address (reflection hack)
+            profiler::resetStack();
 
-            $connection = $thief($requestInput);
-            if ($this->oomKillerEnabled) {
-                $connection->on('close', function($connection) use ($socket) {
+            return new Promise(function ($resolve, $reject) use ($request, $socket) {
+                /** @var StreamInterface $body */
+                $body = $request->getBody();
+                $requestContent = $body->getContents();
+                try {
+                    $prepareResponse = $this->prepare($request, $requestContent);
+                    if(!$prepareResponse['status']) {
+                        $resolve($prepareResponse['response']);
+                        return;
+                    }
+
+                    $app = $this->app($requestContent);
+                    $slim = $app->slim();
+                    $originApplication = $this->applicationInstance->getCurrentApplication();
+                    $this->applicationInstance->setApplication($app);
+                    [$status, $headers, $body] = $slim->runRaw();
+                } catch(\Exception $e) {
+                    $errorMessage = 'ISE: check';
+                    if((int)ini_get('display_errors') !== 0) {
+                        $errorMessage = "Exception: {$e->getMessage()} in {$e->getFile()}:{$e->getLine()}\n{$e->getTraceAsString()}";
+                        $this->output->writeln("<error>[CHILD:{$this->port}]</error> {$errorMessage}");
+                    }
+
+                    $resolve(new reactResponse(500, [], $errorMessage));
+
+                    return;
+                }
+
+                $headers = $headers->all();
+                $this->applicationInstance->setApplication($originApplication);
+
+                static $serverSoftware;
+                if($serverSoftware === null) {
+                    $serverSoftware = 'MPCMF Async PHP ' . phpversion();
+                }
+
+                if (array_key_exists('HTTP_ACCEPT_ENCODING', $_SERVER) && strpos($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip') !== false) {
+                    $headers['Content-Encoding'] = 'gzip';
+                    $body = gzencode($body, 6);
+                }
+
+                $headers['X-PHP-Server'] = $serverSoftware;
+                $headers['X-PHP-Server-Addr'] = "{$this->childHost}:{$this->port}";
+
+                if (isset($headers['Set-Cookie']) && is_string($headers['Set-Cookie']) && strpos($headers['Set-Cookie'], "\n") !== false) {
+                    $headers['Set-Cookie'] = explode("\n", $headers['Set-Cookie']);
+                }
+
+                $response = new ReactResponse($status, $headers, $body);
+                MPCMF_DEBUG && $this->output->writeln("<info>[CHILD:{$this->port}]</info> Connection closed");
+
+                $resolve($response);
+
+                if ($this->oomKillerEnabled) {
                     $memoryUsage = memory_get_usage(true);
                     if ($memoryUsage > $this->maxMemoryUsage) {
                         $this->output->writeln("Child stopped, cuz exceed memory limit ({$memoryUsage})");
 
                         $socket->close();
                     }
-                });
-            }
-
-            if(MPCMF_DEBUG) {
-                $this->output->writeln("<info>[CHILD:{$this->port}]</info> New connection");
-                $clientName = $connection->getRemoteAddress() . '#' . spl_object_hash($request);
-                $this->output->writeln("<info>[{$clientName}] Client connected");
-            }
-
-
-            profiler::resetStack();
-
-            return new Promise(function ($resolve, $reject) use ($request) {
-                /** @var DuplexStreamInterface $body */
-                $body = $request->getBody();
-                $requestContent = '';
-                $body->on('data', function ($data) use (&$requestContent) {
-                    $requestContent .= $data;
-                });
-                $body->on('end', function () use ($resolve, &$requestContent, $request) {
-                    try {
-                        $prepareResponse = $this->prepare($request, $requestContent);
-                        if(!$prepareResponse['status']) {
-                            $resolve($prepareResponse['response']);
-                            return;
-                        }
-
-                        $app = $this->app($requestContent);
-                        $slim = $app->slim();
-                        $originApplication = $this->applicationInstance->getCurrentApplication();
-                        $this->applicationInstance->setApplication($app);
-                        [$status, $headers, $body] = $slim->runRaw();
-                    } catch(\Exception $e) {
-                        $errorMessage = 'ISE: check';
-                        if((int)ini_get('display_errors') !== 0) {
-                            $errorMessage = "Exception: {$e->getMessage()} in {$e->getFile()}:{$e->getLine()}\n{$e->getTraceAsString()}";
-                            $this->output->writeln("<error>[CHILD:{$this->port}]</error> {$errorMessage}");
-                        }
-                        $resolve(new reactResponse(500, [], $errorMessage));
-
-                        return;
-                    }
-
-                    $headers = $headers->all();
-                    $this->applicationInstance->setApplication($originApplication);
-
-                    static $serverSoftware;
-                    if($serverSoftware === null) {
-                        $serverSoftware = 'MPCMF Async PHP ' . phpversion();
-                    }
-
-                    if (array_key_exists('HTTP_ACCEPT_ENCODING', $_SERVER) && strpos($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip') !== false) {
-                        $headers['Content-Encoding'] = 'gzip';
-                        $body = gzencode($body, 6);
-                    }
-
-                    $headers['X-PHP-Server'] = $serverSoftware;
-                    $headers['X-PHP-Server-Addr'] = "{$this->childHost}:{$this->port}";
-
-                    if (isset($headers['Set-Cookie']) && is_string($headers['Set-Cookie']) && strpos($headers['Set-Cookie'], "\n") !== false) {
-                        $headers['Set-Cookie'] = explode("\n", $headers['Set-Cookie']);
-                    }
-
-                    $response = new ReactResponse($status, $headers, $body);
-                    MPCMF_DEBUG && $this->output->writeln("<info>[CHILD:{$this->port}]</info> Connection closed");
-
-                    $resolve($response);
-                });
+                }
             });
         });
         $http->listen($socket);
