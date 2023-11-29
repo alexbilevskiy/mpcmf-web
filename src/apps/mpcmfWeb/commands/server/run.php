@@ -12,19 +12,19 @@ use mpcmf\system\application\webApplicationBase;
 use mpcmf\system\configuration\config;
 use mpcmf\system\helper\system\profiler;
 use mpcmf\system\threads\thread;
+use Psr\Http\Message\UploadedFileInterface;
 use React\Dns\Resolver\Factory as reactResolver;
-use React\EventLoop\Factory;
-use React\Http\Response as reactResponse;
-use React\Http\Server as reactHttpServer;
-use React\Http\ServerRequest;
-use React\Http\UploadedFile;
+use React\EventLoop\Loop;
+use React\Http\HttpServer;
+use React\Http\Message\Response as reactResponse;
+use React\Http\Message\ServerRequest;
 use React\Promise\Promise;
-use React\Socket\Connection;
-use React\Socket\Server as reactSocketServer;
-use React\SocketClient\Connector;
+use React\Promise\PromiseInterface;
+use React\Socket\ConnectionInterface;
+use React\Socket\Connector;
+use React\Socket\SocketServer;
+use React\Stream\DuplexStreamInterface;
 use React\Stream\ReadableStreamInterface;
-use React\Stream\Stream;
-use React\Stream\Stream as reactStream;
 use Slim\Environment;
 use Slim\Http\Request;
 use Slim\Http\Response;
@@ -184,7 +184,7 @@ abstract class run
 
         //MPCMF_DEBUG && $output->writeln('<error>[MASTER]</error> Preparing server');
 
-        $loop = Factory::create();
+        $loop = Loop::get();
 
         $dnsResolverFactory = new reactResolver();
         $dns = $dnsResolverFactory->createCached('8.8.8.8', $loop);
@@ -192,12 +192,12 @@ abstract class run
 
         $output->writeln('<error>[MASTER]</error> Binding callables and building socketServer');
 
-        $socketServer = new reactSocketServer("{$bindMasterTo['host']}:{$bindMasterTo['port']}", $loop);
+        $socketServer = new SocketServer("{$bindMasterTo['host']}:{$bindMasterTo['port']}", [], $loop);
         $socketServer->pause();
 
         $clientId = null;
 
-        $socketServer->on('connection', function (Connection $clientConnection) use ($connector, $output, $clientId, $loop) {
+        $socketServer->on('connection', function (ConnectionInterface $clientConnection) use ($connector, $output, $clientId, $loop) {
 
             $clientConnection->pause();
 
@@ -207,7 +207,6 @@ abstract class run
                 if($this->threads[$threadKey]->isAlive()) {
                     break;
                 }
-                $loop->tick();
             } while(true);
             $childPort = json_decode($threadKey, true)['port'];
 
@@ -221,9 +220,9 @@ abstract class run
                 //MPCMF_DEBUG && $output->writeln("<error>[MASTER:{$clientId}]</error> Client connection closed");
             });
 
-            /** @var \React\Promise\FulfilledPromise|\React\Promise\Promise|\React\Promise\RejectedPromise $childConnection */
-            $childConnection = $connector->create($this->childHost, $childPort);
-            $childConnection->then(function (reactStream $childStream) use ($clientConnection, $childConnection, $output, $clientId) {
+            /** @var PromiseInterface $childConnection */
+            $childConnection = $connector->connect("{$this->childHost}:{$childPort}");
+            $childConnection->then(function (DuplexStreamInterface $childStream) use ($clientConnection, $childConnection, $output, $clientId) {
 
                 $childStream->pause();
 
@@ -234,7 +233,7 @@ abstract class run
                     //MPCMF_DEBUG && $output->writeln('<error>=================== ' . spl_object_hash($childStream) . ' CHILD STREAM CLOSE</error>');
                     $childStream->close();
 
-                    $clientConnection->getBuffer()->on('full-drain', function() use ($clientConnection, $output, $clientId) {
+                    $clientConnection->on('full-drain', function() use ($clientConnection, $output, $clientId) {
                         //MPCMF_DEBUG && $output->writeln("<error>[MASTER:{$clientId}]</error> Buffer is empty, closing client connection");
                         $clientConnection->close();
                     });
@@ -282,17 +281,17 @@ abstract class run
 //        posix_seteuid(99);
 //        posix_setegid(99);
 
-        $loop = Factory::create();
-        $socket = new reactSocketServer("{$this->childHost}:{$this->port}", $loop);
+        $loop = Loop::get();
+        $socket = new SocketServer("{$this->childHost}:{$this->port}", [], $loop);
         $socket->pause();
-        $http = new reactHttpServer(function (ServerRequest $request) use ($socket) {
+        $http = new HttpServer(function (ServerRequest $request) use ($socket) {
             // @HACK for get client address (reflection hack)
             /** @var ReadableStreamInterface $requestInput */
             $requestInput = $request->getBody()->input;
             $thief = function (ReadableStreamInterface $reflectionClass) {
                 $connection = isset($reflectionClass->input) ? $reflectionClass->input : $reflectionClass->stream->input;
 
-                return $connection instanceof Connection ? $connection : $connection->input;
+                return $connection instanceof ConnectionInterface ? $connection : $connection->input;
             };
             $thief = \Closure::bind($thief, null, $requestInput);
             // @HACK for get client address (reflection hack)
@@ -319,7 +318,7 @@ abstract class run
             profiler::resetStack();
 
             return new Promise(function ($resolve, $reject) use ($request) {
-                /** @var Stream $body */
+                /** @var DuplexStreamInterface $body */
                 $body = $request->getBody();
                 $requestContent = '';
                 $body->on('data', function ($data) use (&$requestContent) {
@@ -438,7 +437,7 @@ abstract class run
         $_FILES = [];
         foreach($request->getUploadedFiles() as $filename => $fileData) {
             $tmpname = tempnam('/tmp/mpcmf/', 'upl');
-            if ($fileData instanceof UploadedFile) {
+            if ($fileData instanceof UploadedFileInterface) {
                 $fileContent = $fileData->getStream()->getContents();
                 $type = $fileData->getClientMediaType();
                 $error = $fileData->getError();
