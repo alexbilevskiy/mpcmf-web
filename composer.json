@@ -14,17 +14,15 @@
     ],
     "require": {
         "react/http": "^0.7@dev",
-        "mpcmf/mpcmf-console": "dev-master",
-        "mpcmf/mpcmf-core": "dev-master",
+        "mpcmf/mpcmf-console": "dev-feature/php82 as dev-master",
+        "mpcmf/mpcmf-core": "dev-feature/php82 as dev-master",
         "react/socket-client": "^0.5.0@dev",
         "react/socket": "^0.7@dev",
         "guzzlehttp/psr7": "1.4.2"
     },
     "repositories": [
-        {
-            "type": "vcs",
-            "url": "git@github.com:greevex/mpcmf-console.git"
-        }
+        { "type": "vcs", "url": "git@github.com:alexbilevskiy/mpcmf-core.git" },
+        { "type": "vcs", "url": "git@github.com:alexbilevskiy/mpcmf-console.git" }
     ],
     "autoload": {
         "psr-4": {
