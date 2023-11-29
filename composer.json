@@ -18,7 +18,7 @@
         "mpcmf/mpcmf-console": "dev-feature/php82 as dev-master",
         "mpcmf/mpcmf-core": "dev-feature/php82 as dev-master",
         "react/socket": "^1.14@dev",
-        "guzzlehttp/psr7": "1.4.2"
+        "guzzlehttp/psr7": "^2"
     },
     "repositories": [
         { "type": "vcs", "url": "git@github.com:alexbilevskiy/mpcmf-core.git" },
